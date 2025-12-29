@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>波动光学仿真实验</title>
+    <script src="https://cdn.jsdelivr.net/npm/react@18.0.0/umd/react.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.0.0/umd/react-dom.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css"
+    />
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: "Arial", sans-serif;
+      }
+      .gradient-bg {
+        background: linear-gradient(
+          135deg,
+          #667eea 0%,
+          #f093fb 50%,
+          #f5576c 100%
+        );
+      }
+      .experiment-bg {
+        background: linear-gradient(
+          135deg,
+          #667eea 0%,
+          #f093fb 50%,
+          #f5576c 100%
+        );
+      }
+      .custom-slider {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 100%;
+        height: 6px;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.3);
+        outline: none;
+      }
+      .custom-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #3b82f6;
+        cursor: pointer;
+        box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.5);
+      }
+      .custom-slider::-moz-range-thumb {
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #3b82f6;
+        cursor: pointer;
+        box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.5);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useState, useEffect, useRef } = React;
+
+      // 光学公式计算工具
+      const OpticalMath = {
+        // 单缝衍射
+        singleSlitIntensity: (theta, b, lambda) => {
+          const beta = (Math.PI * b * Math.sin(theta)) / lambda;
+          if (Math.abs(beta) < 1e-10) return 1;
+          return Math.pow(Math.sin(beta) / beta, 2);
+        },
+
+        // 双缝干涉（更健壮的数值实现）
+        doubleSlitIntensity: (theta, b, d, lambda) => {
+          const sinT = Math.sin(theta);
+          const beta = (Math.PI * b * sinT) / lambda;
+          const delta = (2 * Math.PI * d * sinT) / lambda;
+
+          // 单缝包络：处理 beta 接近 0 的情况
+          let singleSlit;
+          if (Math.abs(beta) < 1e-10) {
+            singleSlit = 1;
+          } else {
+            singleSlit = Math.pow(Math.sin(beta) / beta, 2);
+          }
+
+          // 双缝干涉项（cos^2），安全计算
+          const doubleSlit = Math.pow(Math.cos(delta / 2), 2);
+
+          let I = singleSlit * doubleSlit;
+          if (!isFinite(I) || isNaN(I)) I = 0;
+          return Math.max(0, Math.min(1, I));
+        },
+
+        // 圆孔衍射（艾里斑）
+        circularApertureIntensity: (theta, D, lambda) => {
+          // I(θ) = [2 J1(α) / α]^2,  α = π D sinθ / λ
+          const alpha = (Math.PI * D * Math.sin(theta)) / lambda;
+          // small alpha limit -> I = 1
+          if (Math.abs(alpha) < 1e-12) return 1;
+
+          // 计算一阶贝塞尔函数 J1(α)（幂级数展开）
+          const besselJ1 = (x) => {
+            if (Math.abs(x) < 1e-12) return 0;
+            let term = x / 2; // k=0 项
+            let sum = term;
+            for (let k = 1; k < 60; k++) {
+              // 递推：term_{k} = term_{k-1} * ( - x^2 / (4*k*(k+1)) )
+              term *= -(x * x) / (4 * k * (k + 1));
+              sum += term;
+              if (Math.abs(term) < 1e-16) break;
+            }
+            return sum;
+          };
+
+          const j1 = besselJ1(alpha);
+          const val = (2 * j1) / alpha;
+          const I = val * val;
+          if (!isFinite(I) || isNaN(I)) return 0;
+          return Math.max(0, Math.min(1, I));
+        },
+
+        // 光栅衍射（更健壮的数值实现）
+        gratingIntensity: (theta, b, d, N, lambda) => {
+          const sinT = Math.sin(theta);
+          const beta = (Math.PI * b * sinT) / lambda;
+          const delta = (2 * Math.PI * d * sinT) / lambda;
+
+          // 单缝包络：处理 beta 接近 0 的情况
+          let singleSlit;
+          if (Math.abs(beta) < 1e-8) {
+            singleSlit = 1;
+          } else {
+            singleSlit = Math.pow(Math.sin(beta) / beta, 2);
+          }
+
+          // 多缝因子：处理分母接近 0 的情况以避免 0/0
+          let multiSlit;
+          const denom = Math.sin(delta / 2);
+          if (Math.abs(denom) < 1e-12) {
+            // 当 delta/2 = mπ 时，多缝因子取极限值 1
+            multiSlit = 1;
+          } else {
+            multiSlit = Math.pow(Math.sin((N * delta) / 2) / (N * denom), 2);
+          }
+
+          let I = singleSlit * multiSlit;
+          if (!isFinite(I) || isNaN(I)) I = 0;
+          return Math.max(0, Math.min(1, I));
+        },
+
+        // 牛顿环
+        newtonRingIntensity: (r, R, n, lambda) => {
+          const d = (r * r) / (2 * R);
+          const phase = (2 * Math.PI * n * d) / lambda + Math.PI;
+          return Math.pow(Math.cos(phase / 2), 2);
+        },
+
+        // 劈尖干涉
+        wedgeIntensity: (x, theta, n, lambda) => {
+          const d = x * theta;
+          const phase = (2 * Math.PI * n * d) / lambda + Math.PI;
+          return Math.pow(Math.cos(phase / 2), 2);
+        },
+
+        // 马吕斯定律
+        malusLaw: (theta) => {
+          return Math.pow(Math.cos(theta), 2);
+        },
+      };
+
+      // 图表组件
+      const IntensityChart = ({ data, title, color = "#3b82f6" }) => {
+        const canvasRef = useRef(null);
+
+        useEffect(() => {
+          const canvas = canvasRef.current;
+          const ctx = canvas.getContext("2d");
+          const width = canvas.width;
+          const height = canvas.height;
+
+          // 清空画布
+          ctx.clearRect(0, 0, width, height);
+
+          // 绘制网格
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+          ctx.lineWidth = 1;
+          for (let i = 0; i <= 10; i++) {
+            const y = ((height - 40) * i) / 10 + 20;
+            ctx.beginPath();
+            ctx.moveTo(40, y);
+            ctx.lineTo(width - 20, y);
+            ctx.stroke();
+          }
+          for (let i = 0; i <= 10; i++) {
+            const x = ((width - 60) * i) / 10 + 40;
+            ctx.beginPath();
+            ctx.moveTo(x, 20);
+            ctx.lineTo(x, height - 20);
+            ctx.stroke();
+          }
+
+          // 绘制坐标轴
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(40, height - 20);
+          ctx.lineTo(width - 20, height - 20);
+          ctx.moveTo(40, 20);
+          ctx.lineTo(40, height - 20);
+          ctx.stroke();
+
+          // 绘制数据（支持按角度映射横坐标）
+          if (data && data.length > 0) {
+            const maxValue = Math.max(...data.map((d) => d.intensity));
+            const minValue = Math.min(...data.map((d) => d.intensity));
+            const range = maxValue - minValue || 1;
+
+            // 如果数据包含角度字段则按角度做线性映射
+            let useAngle = false;
+            let minAngle = 0;
+            let maxAngle = 1;
+            if (data[0].angle !== undefined) {
+              useAngle = true;
+              minAngle = Math.min(...data.map((d) => d.angle));
+              maxAngle = Math.max(...data.map((d) => d.angle));
+              if (Math.abs(maxAngle - minAngle) < 1e-12) {
+                minAngle -= 1e-6;
+                maxAngle += 1e-6;
+              }
+            }
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            data.forEach((point, index) => {
+              const x = useAngle
+                ? 40 +
+                  (width - 60) *
+                    ((point.angle - minAngle) / (maxAngle - minAngle))
+                : 40 + (width - 60) * (index / (data.length - 1));
+              const y =
+                height -
+                20 -
+                (height - 40) * ((point.intensity - minValue) / range);
+              if (index === 0) {
+                ctx.moveTo(x, y);
+              } else {
+                ctx.lineTo(x, y);
+              }
+            });
+            ctx.stroke();
+
+            // 绘制数据点
+            ctx.fillStyle = color;
+            data.forEach((point, index) => {
+              const x = useAngle
+                ? 40 +
+                  (width - 60) *
+                    ((point.angle - minAngle) / (maxAngle - minAngle))
+                : 40 + (width - 60) * (index / (data.length - 1));
+              const y =
+                height -
+                20 -
+                (height - 40) * ((point.intensity - minValue) / range);
+              ctx.beginPath();
+              ctx.arc(x, y, 2, 0, 2 * Math.PI);
+              ctx.fill();
+            });
+          }
+
+          // 绘制标签与刻度（若数据包含屏幕位置则以位置显示，否则显示角度）
+          ctx.fillStyle = "white";
+          ctx.font = "12px Arial";
+          ctx.textAlign = "center";
+
+          // 绘制x轴刻度和标签（优先使用 position，其次 angle）
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+          ctx.lineWidth = 1;
+          if (data && data.length > 1) {
+            const usePosition = data[0].position !== undefined;
+            const useAngle = !usePosition && data[0].angle !== undefined;
+            const ticks = 4;
+            for (let t = 0; t <= ticks; t++) {
+              const idx = Math.round((t * (data.length - 1)) / ticks);
+              const point = data[idx];
+
+              // 计算刻度 x 坐标
+              let x;
+              if (usePosition) {
+                const minPos = Math.min(...data.map((d) => d.position));
+                const maxPos = Math.max(...data.map((d) => d.position));
+                const frac =
+                  (point.position - minPos) / (maxPos - minPos || 1e-12);
+                x = 40 + (width - 60) * frac;
+              } else if (useAngle) {
+                const minA = Math.min(...data.map((d) => d.angle));
+                const maxA = Math.max(...data.map((d) => d.angle));
+                const frac = (point.angle - minA) / (maxA - minA || 1e-12);
+                x = 40 + (width - 60) * frac;
+              } else {
+                x = 40 + (width - 60) * (idx / (data.length - 1));
+              }
+
+              ctx.beginPath();
+              ctx.moveTo(x, height - 20);
+              ctx.lineTo(x, height - 15);
+              ctx.stroke();
+
+              // 格式化标签
+              let label = "";
+              if (usePosition) {
+                label = (point.position * 1000).toFixed(2) + " mm";
+              } else if (useAngle) {
+                label = ((point.angle * 180) / Math.PI).toFixed(2) + "°";
+              } else {
+                label = idx.toString();
+              }
+
+              ctx.fillText(label, x, height - 2);
+            }
+          } else {
+            ctx.fillText("角度", width / 2, height - 5);
+          }
+
+          // y轴标签
+          ctx.save();
+          ctx.translate(15, height / 2);
+          ctx.rotate(-Math.PI / 2);
+          ctx.fillText("相对光强", 0, 0);
+          ctx.restore();
+        }, [data, color]);
+
+        return (
+          <div className="bg-black bg-opacity-30 rounded-lg p-4">
+            <h3 className="text-white text-center mb-2">{title}</h3>
+            <canvas
+              ref={canvasRef}
+              width="400"
+              height="300"
+              className="w-full"
+            ></canvas>
+          </div>
+        );
+      };
+
+      // 图样组件
+      const PatternDisplay = ({ pattern, title, params }) => {
+        const canvasRef = useRef(null);
+
+        useEffect(() => {
+          const canvas = canvasRef.current;
+          const ctx = canvas.getContext("2d");
+          const width = canvas.width;
+          const height = canvas.height;
+
+          ctx.clearRect(0, 0, width, height);
+
+          // 绘制黑色背景
+          ctx.fillStyle = "black";
+          ctx.fillRect(0, 0, width, height);
+
+          // 根据不同的图案类型绘制
+          if (pattern === "singleSlit") {
+            // 单缝衍射图样（按角度展开并填充整列以便观察）
+            const centerX = width / 2;
+            const b = Math.max(params.slitWidth * 1e-3, 1e-9);
+            const lambda = params.wavelength * 1e-9;
+
+            // 使用 λ/b 作为标度，显示若干主极
+            const fringeAngular = lambda / b;
+            const maxAngle = Math.min(0.5, Math.max(0.01, 6 * fringeAngular));
+
+            for (let x = 0; x < width; x++) {
+              const theta = ((x - centerX) / (width / 2)) * maxAngle;
+              let intensity = OpticalMath.singleSlitIntensity(theta, b, lambda);
+              // 轻微提升弱信号可视性
+              const brightness = Math.pow(Math.max(0, intensity), 0.6) * 255;
+
+              ctx.fillStyle = `rgb(${brightness}, ${brightness}, ${brightness})`;
+              ctx.fillRect(x, 0, 1, height);
+            }
+          } else if (pattern === "doubleSlit") {
+            // 双缝干涉图样（用角度映射在水平方向展开，竖直方向填满）
+            const centerX = width / 2;
+            const d = Math.max(params.slitDistance * 1e-3, 1e-9);
+            const b = Math.max(params.slitWidth * 1e-3, 1e-9);
+            const wavelength = params.wavelength * 1e-9;
+
+            // 根据缝距和波长决定最大角度来展示若干条纹
+            const fringeAngular = wavelength / d;
+            const maxAngle = Math.min(0.5, Math.max(0.04, 5 * fringeAngular));
+
+            for (let x = 0; x < width; x++) {
+              const theta = ((x - centerX) / (width / 2)) * maxAngle; // radians
+              const intensity = OpticalMath.doubleSlitIntensity(
+                theta,
+                b,
+                d,
+                wavelength
+              );
+              const brightness = Math.max(0, Math.min(1, intensity)) * 255;
+
+              ctx.fillStyle = `rgb(${brightness}, ${brightness}, ${brightness})`;
+              ctx.fillRect(x, 0, 1, height);
+            }
+          } else if (pattern === "circularAperture") {
+            // 圆孔衍射（艾里斑）——按角度与焦距映射到画布并像素化填充
+            const centerX = width / 2;
+            const centerY = height / 2;
+            const D = Math.max(params.apertureDiameter * 1e-3, 1e-9);
+            const lambda = params.wavelength * 1e-9;
+            const f = Math.max(params.focalLength, 1e-6);
+
+            // 使用 λ/D 作为角度标度，展示若干环
+            const fringeAngular = lambda / D;
+            const maxAngle = Math.min(0.6, Math.max(0.01, 6 * fringeAngular));
+
+            // 对应到屏幕上的最大物理半径 R_phys = f * tan(maxAngle)
+            const R_phys = f * Math.tan(maxAngle);
+            const maxRadiusPx = Math.min(width, height) / 2;
+            const metersPerPx = R_phys / maxRadiusPx; // 每像素对应的物理距离
+
+            for (let y = 0; y < height; y++) {
+              for (let x = 0; x < width; x++) {
+                const dx = x - centerX;
+                const dy = y - centerY;
+                const rpx = Math.sqrt(dx * dx + dy * dy);
+                if (rpx <= maxRadiusPx) {
+                  const r_phys = rpx * metersPerPx; // 屏幕上到中心的物理距离（m）
+                  const theta = Math.atan2(r_phys, f); // 精确角度
+                  const intensity = OpticalMath.circularApertureIntensity(
+                    theta,
+                    D,
+                    lambda
+                  );
+                  // 轻微伽马校正以增强可视性
+                  const brightness =
+                    Math.pow(Math.max(0, intensity), 0.6) * 255;
+                  ctx.fillStyle = `rgb(${brightness}, ${brightness}, ${brightness})`;
+                  ctx.fillRect(x, y, 1, 1);
+                }
+              }
+            }
+          } else if (pattern === "grating") {
+            // 光栅衍射图样（2D：在画布上按角度展开）
+            const centerX = width / 2;
+            const d = params.gratingConstant * 1e-6; // grating spacing (m)
+            const b = Math.max(d * 0.3, 1e-7); // slit width as fraction of spacing
+            const N = params.slitNumber;
+            const wavelength = params.wavelength * 1e-9;
+            // choose a max angle that adapts to the grating (show several orders)
+            const maxAngle = Math.min(
+              0.4,
+              Math.max(0.12, (3 * wavelength) / d)
+            );
+
+            for (let x = 0; x < width; x++) {
+              const theta = ((x - centerX) / (width / 2)) * maxAngle; // map x to angle (radians)
+              const intensity = OpticalMath.gratingIntensity(
+                theta,
+                b,
+                d,
+                N,
+                wavelength
+              );
+              const brightness = Math.max(0, Math.min(1, intensity)) * 255;
+
+              ctx.fillStyle = `rgb(${brightness}, ${brightness}, ${brightness})`;
+              ctx.fillRect(x, 0, 1, height); // fill full vertical column
+            }
+          } else if (pattern === "newtonRing") {
+            // 牛顿环 — 物理映射并放大显示
+            const centerX = width / 2;
+            const centerY = height / 2;
+            const maxRadiusPx = Math.min(width, height) * 0.48;
+
+            const wavelength = params.wavelength * 1e-9;
+            const R = Math.max(1e-6, params.curvatureRadius);
+            // 估算有意义的物理半径范围：r_max ≈ sqrt(m * λ * R), 取 m≈20，并限制在 5mm-50mm 之间
+            const maxPhysicalRadius = Math.min(
+              0.05,
+              Math.max(0.005, Math.sqrt(20 * wavelength * R))
+            );
+
+            for (let r_px = 0; r_px < maxRadiusPx; r_px += 0.5) {
+              const r_phys = (r_px / maxRadiusPx) * maxPhysicalRadius; // meters
+              const intensity = OpticalMath.newtonRingIntensity(
+                r_phys,
+                R,
+                params.refractiveIndex,
+                wavelength
+              );
+              const brightness = intensity * 255;
+
+              ctx.strokeStyle = `rgb(${brightness}, ${brightness}, ${brightness})`;
+              ctx.lineWidth = 1;
+              ctx.beginPath();
+              ctx.arc(centerX, centerY, r_px, 0, 2 * Math.PI);
+              ctx.stroke();
+            }
+          } else if (pattern === "wedge") {
+            // 劈尖干涉
+            const wedgeAngle = params.wedgeAngle;
+            const refractiveIndex = params.refractiveIndex;
+            const wavelength = params.wavelength * 1e-9;
+
+            for (let x = 0; x < width; x++) {
+              const d = x * wedgeAngle;
+              const phase =
+                (2 * Math.PI * refractiveIndex * d) / wavelength + Math.PI;
+              const intensity = Math.pow(Math.cos(phase / 2), 2);
+              const brightness = intensity * 255;
+
+              ctx.fillStyle = `rgb(${brightness}, ${brightness}, ${brightness})`;
+              ctx.fillRect(x, 0, 1, height);
+            }
+          } else if (pattern === "malusLaw") {
+            // 马吕斯定律图样
+            const centerX = width / 2;
+            const centerY = height / 2;
+            const lineLength = 100;
+
+            // 绘制偏振片
+            ctx.strokeStyle = "red";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(centerX - lineLength / 2, centerY);
+            ctx.lineTo(centerX + lineLength / 2, centerY);
+            ctx.stroke();
+
+            ctx.strokeStyle = "blue";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(
+              centerX -
+                (lineLength / 2) *
+                  Math.cos((params.polarizerAngle * Math.PI) / 180),
+              centerY -
+                (lineLength / 2) *
+                  Math.sin((params.polarizerAngle * Math.PI) / 180)
+            );
+            ctx.lineTo(
+              centerX +
+                (lineLength / 2) *
+                  Math.cos((params.polarizerAngle * Math.PI) / 180),
+              centerY +
+                (lineLength / 2) *
+                  Math.sin((params.polarizerAngle * Math.PI) / 180)
+            );
+            ctx.stroke();
+
+            // 添加标签
+            ctx.fillStyle = "white";
+            ctx.font = "14px Arial";
+            ctx.fillText("P1", centerX + lineLength / 2 + 10, centerY + 5);
+            ctx.fillText(
+              "P2",
+              centerX +
+                (lineLength / 2) *
+                  Math.cos((params.polarizerAngle * Math.PI) / 180) +
+                10,
+              centerY +
+                (lineLength / 2) *
+                  Math.sin((params.polarizerAngle * Math.PI) / 180) +
+                5
+            );
+          }
+        }, [pattern, params]);
+
+        return (
+          <div className="bg-black bg-opacity-30 rounded-lg p-4">
+            <h3 className="text-white text-center mb-2">{title}</h3>
+            <canvas
+              ref={canvasRef}
+              width="400"
+              height="300"
+              className="w-full"
+            ></canvas>
+          </div>
+        );
+      };
+
+      // 参数滑块组件
+      const ParameterSlider = ({
+        label,
+        value,
+        setValue,
+        min,
+        max,
+        step,
+        unit,
+      }) => {
+        return (
+          <div className="mb-4">
+            <div className="flex justify-between items-center mb-2">
+              <label className="text-white">
+                {label} ({unit})
+              </label>
+              <span className="text-white bg-black bg-opacity-30 px-3 py-1 rounded">
+                {value}
+              </span>
+            </div>
+            <div className="relative">
+              <input
+                type="range"
+                min={min}
+                max={max}
+                step={step}
+                value={value}
+                onChange={(e) => setValue(parseFloat(e.target.value))}
+                className="custom-slider"
+              />
+            </div>
+          </div>
+        );
+      };
+
+      // 双缝干涉实验
+      const DoubleSlitExperiment = () => {
+        const [slitWidth, setSlitWidth] = useState(0.009);
+        const [slitDistance, setSlitDistance] = useState(0.2);
+        const [wavelength, setWavelength] = useState(633);
+        const [intensityData, setIntensityData] = useState([]);
+
+        useEffect(() => {
+          const data = [];
+
+          const d = Math.max(slitDistance * 1e-3, 1e-9);
+          const lambda = wavelength * 1e-9;
+
+          // 根据缝距与波长确定展示范围（多个干涉级）
+          const fringeAngular = lambda / d; // 约为相邻条纹角距
+          const maxAngle = Math.min(0.5, Math.max(0.02, 6 * fringeAngular));
+
+          // 使用较高采样以便精细展示条纹
+          const samplesPerSide = 900;
+          const step = maxAngle / samplesPerSide;
+
+          for (let i = -samplesPerSide; i <= samplesPerSide; i++) {
+            const theta = i * step;
+            const intensity = OpticalMath.doubleSlitIntensity(
+              theta,
+              slitWidth * 1e-3,
+              d,
+              lambda
+            );
+            data.push({ angle: theta, intensity });
+          }
+          setIntensityData(data);
+        }, [slitWidth, slitDistance, wavelength]);
+
+        return (
+          <div>
+            <h2 className="text-2xl text-white text-center mb-6">
+              双缝干涉动态模拟
+            </h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+              <ParameterSlider
+                label="缝宽"
+                value={slitWidth}
+                setValue={setSlitWidth}
+                min={0.001}
+                max={0.1}
+                step={0.001}
+                unit="mm"
+              />
+              <ParameterSlider
+                label="缝距"
+                value={slitDistance}
+                setValue={setSlitDistance}
+                min={0.1}
+                max={1.0}
+                step={0.01}
+                unit="mm"
+              />
+              <ParameterSlider
+                label="波长"
+                value={wavelength}
+                setValue={setWavelength}
+                min={400}
+                max={700}
+                step={1}
+                unit="nm"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <IntensityChart
+                data={intensityData}
+                title="干涉光强分布"
+                color="#ec4899"
+              />
+              <PatternDisplay
+                pattern="doubleSlit"
+                title="干涉条纹"
+                params={{
+                  slitWidth,
+                  slitDistance,
+                  wavelength,
+                }}
+              />
+            </div>
+
+            <div className="mt-6 bg-black bg-opacity-30 rounded-lg p-4">
+              <h3 className="text-white font-bold mb-2">双缝干涉原理：</h3>
+              <p className="text-white text-sm">
+                双缝干涉是波动光学的经典实验。光通过两个狭缝后，在屏幕上形成明暗相间的干涉条纹。光强分布由单缝衍射因子和双缝干涉因子共同决定：I(θ)=I₀[sin(β)/β]²·cos²[δ/2]，其中β
+                = πb sin(θ)/λ, δ = (2πd sin(θ))/λ, b为缝宽, d为缝距。
+              </p>
+            </div>
+          </div>
+        );
+      };
+
+      // 劈尖干涉实验
+      const WedgeExperiment = () => {
+        const [refractiveIndex, setRefractiveIndex] = useState(1.12);
+        const [wedgeAngle, setWedgeAngle] = useState(0.0016);
+        const [wavelength, setWavelength] = useState(589);
+        const [intensityData, setIntensityData] = useState([]);
+
+        useEffect(() => {
+          const data = [];
+          for (let i = 0; i <= 100; i++) {
+            const x = i * 2;
+            const intensity = OpticalMath.wedgeIntensity(
+              x,
+              wedgeAngle,
+              refractiveIndex,
+              wavelength * 1e-9
+            );
+            data.push({ position: x, intensity });
+          }
+          setIntensityData(data);
+        }, [refractiveIndex, wedgeAngle, wavelength]);
+
+        return (
+          <div>
+            <h2 className="text-2xl text-white text-center mb-6">
+              劈尖干涉条纹模拟
+            </h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+              <ParameterSlider
+                label="介质折射率"
+                value={refractiveIndex}
+                setValue={setRefractiveIndex}
+                min={1}
+                max={2}
+                step={0.01}
+                unit="n"
+              />
+              <ParameterSlider
+                label="劈尖角"
+                value={wedgeAngle}
+                setValue={setWedgeAngle}
+                min={0.0001}
+                max={0.01}
+                step={0.0001}
+                unit="rad"
+              />
+              <ParameterSlider
+                label="波长"
+                value={wavelength}
+                setValue={setWavelength}
+                min={400}
+                max={700}
+                step={1}
+                unit="nm"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <IntensityChart
+                data={intensityData}
+                title="劈尖干涉光强分布"
+                color="#f97316"
+              />
+              <PatternDisplay
+                pattern="wedge"
+                title="劈尖干涉条纹"
+                params={{ refractiveIndex, wedgeAngle, wavelength }}
+              />
+            </div>
+
+            <div className="mt-6 bg-black bg-opacity-30 rounded-lg p-4">
+              <h3 className="text-white font-bold mb-2">劈尖干涉原理：</h3>
+              <p className="text-white text-sm">
+                劈尖干涉是由两块玻璃板之间的空气劈尖薄膜产生的等厚干涉条纹，光程差为δ
+                = 2d +
+                λ/2，其中d为空气膜厚度，与位置x的关系为d=x·tan(θ)=x·θ(θ很小)。
+                <br />
+                <br />
+                干涉条件：明环条件 2d + λ/2 = mλ；暗环条件 2d + λ/2 =
+                (m+1/2)λ，其中m为干涉级次。相邻明纹或暗纹的间距为Δx = λ/(2θ)。
+              </p>
+            </div>
+          </div>
+        );
+      };
+
+      // 牛顿环实验
+      const NewtonRingExperiment = () => {
+        const [curvatureRadius, setCurvatureRadius] = useState(0.5);
+        const [refractiveIndex, setRefractiveIndex] = useState(1.33);
+        const [wavelength, setWavelength] = useState(633);
+        const [intensityData, setIntensityData] = useState([]);
+
+        useEffect(() => {
+          const data = [];
+          const lambda = wavelength * 1e-9;
+          const R = Math.max(1e-6, curvatureRadius);
+          // 估算物理上有意义的最大半径：r_max ≈ sqrt(m * λ * R)（取 m≈20），并限制在 5mm-50mm
+          const maxPhysicalRadius = Math.min(
+            0.05,
+            Math.max(0.005, Math.sqrt(20 * lambda * R))
+          );
+          const samples = 400;
+          for (let i = 0; i <= samples; i++) {
+            const r_phys = (i / samples) * maxPhysicalRadius; // meters
+            const intensity = OpticalMath.newtonRingIntensity(
+              r_phys,
+              R,
+              refractiveIndex,
+              lambda
+            );
+            data.push({ position: r_phys, intensity });
+          }
+          setIntensityData(data);
+        }, [curvatureRadius, refractiveIndex, wavelength]);
+
+        return (
+          <div>
+            <h2 className="text-2xl text-white text-center mb-6">
+              牛顿环干涉条纹模拟
+            </h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+              <ParameterSlider
+                label="曲率半径"
+                value={curvatureRadius}
+                setValue={setCurvatureRadius}
+                min={0.05}
+                max={20}
+                step={0.01}
+                unit="m"
+              />
+              <ParameterSlider
+                label="介质折射率"
+                value={refractiveIndex}
+                setValue={setRefractiveIndex}
+                min={1}
+                max={1.6}
+                step={0.01}
+                unit="n"
+              />
+              <ParameterSlider
+                label="波长"
+                value={wavelength}
+                setValue={setWavelength}
+                min={400}
+                max={800}
+                step={1}
+                unit="nm"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <IntensityChart
+                data={intensityData}
+                title="牛顿环干涉光强分布"
+                color="#10b981"
+              />
+              <PatternDisplay
+                pattern="newtonRing"
+                title="牛顿环干涉条纹"
+                params={{ curvatureRadius, refractiveIndex, wavelength }}
+              />
+            </div>
+
+            <div className="mt-6 bg-black bg-opacity-30 rounded-lg p-4">
+              <h3 className="text-white font-bold mb-2">牛顿环原理：</h3>
+              <p className="text-white text-sm">
+                牛顿环是由平凸透镜和平板玻璃之间的空气薄膜产生的等厚干涉条纹，光程差为δ
+                = 2d +
+                λ/2，其中d为空气膜厚度。对于半径为r的环，d=r²/(2R)，其中R为透镜曲率半径。
+                <br />
+                <br />
+                干涉条件：明环条件 2d + λ/2 = mλ；暗环条件 2d + λ/2 =
+                (m+1/2)λ，其中m为干涉级次。
+              </p>
+            </div>
+          </div>
+        );
+      };
+
+      // 单缝衍射实验
+      const SingleSlitExperiment = () => {
+        const [slitWidth, setSlitWidth] = useState(0.1);
+        const [wavelength, setWavelength] = useState(633);
+        const [intensityData, setIntensityData] = useState([]);
+
+        useEffect(() => {
+          const data = [];
+          const b = Math.max(slitWidth * 1e-3, 1e-9);
+          const lambda = wavelength * 1e-9;
+
+          // 中央主极角度尺度大约为 λ/b，取若干倍展示
+          const fringeAngular = lambda / b;
+          const maxAngle = Math.min(0.5, Math.max(0.01, 6 * fringeAngular));
+
+          // 提高采样以更精细地捕获主极和暗纹位置
+          const samplesPerSide = 800;
+          const step = maxAngle / samplesPerSide;
+
+          for (let i = -samplesPerSide; i <= samplesPerSide; i++) {
+            const theta = i * step;
+            const intensity = OpticalMath.singleSlitIntensity(theta, b, lambda);
+            data.push({ angle: theta, intensity });
+          }
+          setIntensityData(data);
+        }, [slitWidth, wavelength]);
+
+        return (
+          <div>
+            <h2 className="text-2xl text-white text-center mb-6">
+              单缝衍射光强分布模拟
+            </h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+              <ParameterSlider
+                label="缝宽"
+                value={slitWidth}
+                setValue={setSlitWidth}
+                min={0.1}
+                max={0.5}
+                step={0.1}
+                unit="mm"
+              />
+              <ParameterSlider
+                label="波长"
+                value={wavelength}
+                setValue={setWavelength}
+                min={400}
+                max={700}
+                step={1}
+                unit="nm"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <IntensityChart
+                data={intensityData}
+                title="相对光强-衍射角度关系曲线"
+                color="#3b82f6"
+              />
+              <PatternDisplay
+                pattern="singleSlit"
+                title="衍射图样"
+                params={{ slitWidth, wavelength }}
+              />
+            </div>
+
+            <div className="mt-6 bg-black bg-opacity-30 rounded-lg p-4">
+              <h3 className="text-white font-bold mb-2">单缝衍射原理：</h3>
+              <p className="text-white text-sm">
+                当光通过单缝时，会发生衍射现象。根据夫琅禾费衍射理论，单缝衍射的光强分布遵循公式：I(θ)=I₀[sin(β)/β]²，其中β
+                = πb sin(θ)/λ, b为缝宽。λ为波长，θ为衍射角。
+              </p>
+            </div>
+          </div>
+        );
+      };
+
+      // 圆孔衍射实验
+      const CircularApertureExperiment = () => {
+        const [apertureDiameter, setApertureDiameter] = useState(0.5);
+        const [wavelength, setWavelength] = useState(633);
+        const [focalLength, setFocalLength] = useState(1);
+        const [intensityData, setIntensityData] = useState([]);
+
+        useEffect(() => {
+          const data = [];
+          const D = Math.max(apertureDiameter * 1e-3, 1e-9);
+          const lambda = wavelength * 1e-9;
+          const f = Math.max(focalLength, 1e-6);
+
+          // 主极尺度约为 λ/D，显示若干个环
+          const fringeAngular = lambda / D;
+          const maxAngle = Math.min(0.6, Math.max(0.01, 6 * fringeAngular));
+
+          const samples = 800;
+          const step = maxAngle / samples;
+          for (let i = 0; i <= samples; i++) {
+            const theta = i * step; // radial (non-negative)
+            const intensity = OpticalMath.circularApertureIntensity(
+              theta,
+              D,
+              lambda
+            );
+            // 对应屏幕上的径向位置（m）: r = f * tan(theta)
+            const r_phys = f * Math.tan(theta);
+            data.push({ angle: theta, position: r_phys, intensity });
+          }
+          setIntensityData(data);
+        }, [apertureDiameter, wavelength, focalLength]);
+
+        return (
+          <div>
+            <h2 className="text-2xl text-white text-center mb-6">
+              圆孔衍射光强分布模拟
+            </h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+              <ParameterSlider
+                label="孔径"
+                value={apertureDiameter}
+                setValue={setApertureDiameter}
+                min={0.1}
+                max={2.0}
+                step={0.1}
+                unit="mm"
+              />
+              <ParameterSlider
+                label="波长"
+                value={wavelength}
+                setValue={setWavelength}
+                min={400}
+                max={700}
+                step={1}
+                unit="nm"
+              />
+              <ParameterSlider
+                label="焦距"
+                value={focalLength}
+                setValue={setFocalLength}
+                min={0.5}
+                max={5.0}
+                step={0.1}
+                unit="m"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <IntensityChart
+                data={intensityData}
+                title="径向光强分布"
+                color="#8b5cf6"
+              />
+              <PatternDisplay
+                pattern="circularAperture"
+                title="圆孔衍射图样 (艾里斑)"
+                params={{ apertureDiameter, wavelength, focalLength }}
+              />
+            </div>
+
+            <div className="mt-6 bg-black bg-opacity-30 rounded-lg p-4">
+              <h3 className="text-white font-bold mb-2">圆孔衍射原理：</h3>
+              <p className="text-white text-sm">
+                圆孔衍射的夫琅禾费衍射图样称为艾里斑。光强分布由第一类一阶贝塞尔函数决定：I(θ)=I₀[2J₁(α)/α]²，其中α
+                = πD sin(θ)/λ，D为圆孔直径，J₁为一阶贝塞尔函数。
+              </p>
+            </div>
+          </div>
+        );
+      };
+
+      // 光栅衍射实验
+      const GratingExperiment = () => {
+        const [gratingConstant, setGratingConstant] = useState(7.7);
+        const [slitNumber, setSlitNumber] = useState(11);
+        const [wavelength, setWavelength] = useState(633);
+        const [intensityData, setIntensityData] = useState([]);
+
+        useEffect(() => {
+          const data = [];
+          const d = gratingConstant * 1e-6; // grating spacing (m)
+          const b = Math.max(d * 0.3, 1e-7); // slit width taken as a fraction of spacing (avoid zero)
+
+          // 根据光栅参数自适应角度范围：显示若干阶（保证最小范围）
+          const range =
+            d > 0
+              ? Math.min(0.6, Math.max(0.12, (3 * wavelength * 1e-9) / d))
+              : 0.12;
+
+          // 使用较高采样分辨率以捕获窄峰
+          const samplesPerSide = 1200;
+          const step = range / samplesPerSide;
+
+          for (let i = -samplesPerSide; i <= samplesPerSide; i++) {
+            const theta = i * step;
+            const intensity = OpticalMath.gratingIntensity(
+              theta,
+              b,
+              d,
+              slitNumber,
+              wavelength * 1e-9
+            );
+            data.push({ angle: theta, intensity });
+          }
+          setIntensityData(data);
+        }, [gratingConstant, slitNumber, wavelength]);
+
+        return (
+          <div>
+            <h2 className="text-2xl text-white text-center mb-6">
+              光栅衍射光强分布模拟
+            </h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+              <ParameterSlider
+                label="光栅常数"
+                value={gratingConstant}
+                setValue={setGratingConstant}
+                min={1}
+                max={20}
+                step={0.1}
+                unit="μm"
+              />
+              <ParameterSlider
+                label="缝数"
+                value={slitNumber}
+                setValue={setSlitNumber}
+                min={2}
+                max={50}
+                step={1}
+                unit="N"
+              />
+              <ParameterSlider
+                label="波长"
+                value={wavelength}
+                setValue={setWavelength}
+                min={400}
+                max={700}
+                step={1}
+                unit="nm"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <IntensityChart
+                data={intensityData}
+                title="光栅衍射光强分布"
+                color="#f59e0b"
+              />
+              <PatternDisplay
+                pattern="grating"
+                title="衍射图样"
+                params={{ gratingConstant, slitNumber, wavelength }}
+              />
+            </div>
+
+            <div className="mt-6 bg-black bg-opacity-30 rounded-lg p-4">
+              <h3 className="text-white font-bold mb-2">光栅衍射原理：</h3>
+              <p className="text-white text-sm">
+                光栅衍射的光强分布是单缝衍射因子和多缝干涉因子的乘积：I(θ)=I₀[sin(β)/β]²·[sin(N·δ/2)/(N·sin(δ/2))]²,
+                其中β = πb sin(θ)/λ, δ = (2πd sin(θ))/λ, b为缝宽,
+                d为光栅常数，N为缝数。
+              </p>
+            </div>
+          </div>
+        );
+      };
+
+      // 马吕斯定律实验
+      const MalusLawExperiment = () => {
+        const [polarizerAngle, setPolarizerAngle] = useState(144);
+        const [isAnimating, setIsAnimating] = useState(false);
+        const [intensityData, setIntensityData] = useState([]);
+
+        useEffect(() => {
+          const data = [];
+          // 采样 0° 到 360°（以弧度保存）以完整展示周期性
+          for (let i = 0; i <= 360; i++) {
+            const angleRad = (i * Math.PI) / 180;
+            const intensity = OpticalMath.malusLaw(angleRad);
+            data.push({ angle: angleRad, intensity });
+          }
+          setIntensityData(data);
+        }, []);
+
+        useEffect(() => {
+          if (isAnimating) {
+            const interval = setInterval(() => {
+              setPolarizerAngle((prev) => (prev + 2) % 360);
+            }, 50);
+            return () => clearInterval(interval);
+          }
+        }, [isAnimating]);
+
+        return (
+          <div>
+            <h2 className="text-2xl text-white text-center mb-6">
+              偏振光的产生与检验 (马吕斯定律)
+            </h2>
+
+            <div className="mb-6">
+              <div className="flex items-center gap-4 mb-4">
+                <ParameterSlider
+                  label="偏振器夹角"
+                  value={polarizerAngle}
+                  setValue={setPolarizerAngle}
+                  min={0}
+                  max={360}
+                  step={1}
+                  unit="度"
+                />
+                <button
+                  onClick={() => setIsAnimating(!isAnimating)}
+                  className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors"
+                >
+                  {isAnimating ? "停止动画演示" : "开始动画演示"}
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <IntensityChart
+                data={intensityData}
+                title="马吕斯定律曲线"
+                color="#84cc16"
+              />
+              <PatternDisplay
+                pattern="malusLaw"
+                title="偏振器方向"
+                params={{ polarizerAngle }}
+              />
+            </div>
+
+            <div className="mt-6 bg-black bg-opacity-30 rounded-lg p-4">
+              <h3 className="text-white font-bold mb-2">马吕斯定律：</h3>
+              <p className="text-white text-sm">
+                当自然光通过起偏器后变成线偏振光，再通过检偏器时，透射光强遵循马吕斯定律：I=I₀
+                cos²(θ)，其中θ为起偏器与检偏器偏振方向之间的夹角，I₀为入射光强。
+              </p>
+            </div>
+          </div>
+        );
+      };
+
+      // 主应用
+      const App = () => {
+        const [activeExperiment, setActiveExperiment] = useState("doubleSlit");
+
+        const experiments = [
+          {
+            id: "doubleSlit",
+            name: "双缝干涉",
+            component: DoubleSlitExperiment,
+          },
+          { id: "wedge", name: "劈尖干涉", component: WedgeExperiment },
+          { id: "newtonRing", name: "牛顿环", component: NewtonRingExperiment },
+          {
+            id: "singleSlit",
+            name: "单缝衍射",
+            component: SingleSlitExperiment,
+          },
+          {
+            id: "circularAperture",
+            name: "圆孔衍射",
+            component: CircularApertureExperiment,
+          },
+          { id: "grating", name: "光栅衍射", component: GratingExperiment },
+          { id: "malusLaw", name: "马吕斯定律", component: MalusLawExperiment },
+        ];
+
+        const CurrentExperiment = experiments.find(
+          (exp) => exp.id === activeExperiment
+        )?.component;
+
+        return (
+          <div className="min-h-screen gradient-bg">
+            {/* 标题区域 */}
+            <div className="text-center py-8">
+              <h1 className="text-4xl font-bold text-white mb-2">
+                波动光学仿真实验
+              </h1>
+              <p className="text-white text-lg">基于HTML5的数值仿真模拟</p>
+            </div>
+
+            {/* 实验选择按钮 */}
+            <div className="flex flex-wrap justify-center gap-4 px-4 mb-8">
+              {experiments.map((exp) => (
+                <button
+                  key={exp.id}
+                  onClick={() => setActiveExperiment(exp.id)}
+                  className={`px-6 py-3 rounded-lg font-medium transition-all ${
+                    activeExperiment === exp.id
+                      ? "bg-white text-purple-600 shadow-lg"
+                      : "bg-white bg-opacity-20 text-white hover:bg-opacity-30"
+                  }`}
+                >
+                  {exp.name}
+                </button>
+              ))}
+            </div>
+
+            {/* 实验内容区域 */}
+            <div className="max-w-6xl mx-auto px-4 pb-8">
+              <div className="experiment-bg rounded-xl p-8 shadow-2xl">
+                {CurrentExperiment && <CurrentExperiment />}
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      ReactDOM.render(<App />, document.getElementById("root"));
+    </script>
+  </body>
+</html>
